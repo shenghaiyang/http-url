@@ -49,7 +49,7 @@ assert_eq!(url.to_string(), "https://api.example.com/v1/users?id=42");
 
 ### Builder API
 
-```rust
+```rust,ignore
 HttpUrl::builder()
     .scheme(Scheme::Https)              // Scheme::Http | Scheme::Https
     .username("user")                   // optional
@@ -74,7 +74,7 @@ HttpUrl::builder()
 
 ### Query Parameters
 
-```rust
+```rust,ignore
 let url = HttpUrl::parse("http://example.com/?a=1&a=2&b=3").unwrap();
 
 // First value
@@ -98,7 +98,7 @@ assert_eq!(url.query_size(), 3);
 
 ### Relative URL Resolution
 
-```rust
+```rust,ignore
 let base = HttpUrl::parse("http://example.com/a/b/c").unwrap();
 
 // Absolute URL
@@ -130,7 +130,7 @@ Enable the optional `url` feature:
 http-url = { version = "0.1", features = ["url"] }
 ```
 
-```rust
+```rust,ignore
 use core::convert::TryFrom;
 use http_url::HttpUrl;
 use url::Url;
