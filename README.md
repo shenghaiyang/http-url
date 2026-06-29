@@ -1,9 +1,10 @@
 # HttpUrl
 
-[![Crates.io][crates-badge]][crates-url]
-
-[crates-badge]: https://img.shields.io/crates/v/http-url.svg
-[crates-url]: https://crates.io/crates/http-url
+[![Crates.io](https://img.shields.io/crates/v/http-url.svg)](https://crates.io/crates/http-url)
+[![Documentation](https://docs.rs/http-url/badge.svg)](https://docs.rs/http-url)
+[![CI](https://github.com/shenghaiyang/http-url/actions/workflows/ci.yml/badge.svg)](https://github.com/shenghaiyang/http-url/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE-MIT)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE-APACHE)
 
 Parsing and building HTTP/HTTPS URLs in Rust.
 
