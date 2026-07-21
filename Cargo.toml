@@ -3,20 +3,19 @@ name = "http-url"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
-description = "Parsing and building HTTP/HTTPS URLs in Rust."
+description = "A focused HTTP/HTTPS URL builder powered by the `url` crate."
 authors = ["shenghaiyang"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/shenghaiyang/http-url"
 homepage = "https://github.com/shenghaiyang/http-url"
 readme = "README.md"
-keywords = ["url", "http", "https", "parser", "no-std"]
+keywords = ["url", "http", "https", "builder", "no-std"]
 categories = ["network-programming"]
 
 [features]
 default = ["std"]
-std = ["thiserror/std", "url?/std"]
-url = ["dep:url"]
+std = ["thiserror/std", "url/std"]
 
 [dependencies]
 thiserror = { version = "2", default-features = false }
-url = { version = "2", optional = true, default-features = false }
+url = { version = "2", default-features = false }

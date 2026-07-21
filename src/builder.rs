@@ -1,12 +1,23 @@
+use core::str::FromStr;
+
+use alloc::format;
 use alloc::string::String;
 use alloc::string::ToString;
 use alloc::vec::Vec;
 
-use crate::error::Result;
-use crate::util::{host, percent};
-use crate::{HttpUrl, HttpUrlError, Scheme};
+use url::Url;
 
-/// Builder for constructing [`HttpUrl`] values programmatically.
+use crate::HttpUrl;
+use crate::error::{HttpUrlError, Result};
+use crate::scheme::Scheme;
+use crate::util::percent_decode;
+
+/// Builder for constructing HTTP/HTTPS URLs programmatically.
+///
+/// `HttpUrlBuilder` is the focus of this crate. It accumulates URL components
+/// as **decoded** Rust strings and, on [`build`][Self::build] / [`build_url`][Self::build_url],
+/// hands them to the `url` crate, which performs all percent-encoding,
+/// normalization and validation according to the WHATWG URL Standard.
 ///
 /// # Example
 ///
@@ -28,21 +39,21 @@ use crate::{HttpUrl, HttpUrlError, Scheme};
 #[derive(Debug, Clone)]
 pub struct HttpUrlBuilder {
     /// The URL scheme, or `None` if not yet set.
-    pub(crate) scheme: Option<Scheme>,
+    scheme: Option<Scheme>,
     /// Username for basic authentication.
-    pub(crate) username: String,
+    username: String,
     /// Password for basic authentication.
-    pub(crate) password: String,
+    password: String,
     /// The host, or `None` if not yet set.
-    pub(crate) host: Option<String>,
+    host: Option<String>,
     /// The port, or `None` to use the scheme's default.
-    pub(crate) port: Option<u16>,
+    port: Option<u16>,
     /// Decoded path segments.
-    pub(crate) path_segments: Vec<String>,
-    /// Flattened query names and values (name0, value0, name1, value1, …).
-    pub(crate) query_names_and_values: Vec<String>,
+    path_segments: Vec<String>,
+    /// Decoded query parameter pairs.
+    query_pairs: Vec<(String, String)>,
     /// The fragment (decoded), or `None`.
-    pub(crate) fragment: Option<String>,
+    fragment: Option<String>,
 }
 
 impl HttpUrlBuilder {
@@ -55,9 +66,56 @@ impl HttpUrlBuilder {
             host: None,
             port: None,
             path_segments: Vec::new(),
-            query_names_and_values: Vec::new(),
+            query_pairs: Vec::new(),
             fragment: None,
         }
+    }
+
+    /// Create a builder pre-populated from an existing [`url::Url`].
+    ///
+    /// The URL must have an `http` or `https` scheme. The returned builder is
+    /// ready to be modified and rebuilt via [`build`][Self::build] or
+    /// [`build_url`][Self::build_url].
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use http_url::HttpUrlBuilder;
+    ///
+    /// let u = url::Url::parse("https://example.com/a/b?q=1").unwrap();
+    /// let url = HttpUrlBuilder::from_url(u)
+    ///     .unwrap()
+    ///     .add_path_segment("c")
+    ///     .build()
+    ///     .unwrap();
+    /// assert_eq!(url.as_url().path(), "/a/b/c");
+    /// ```
+    pub fn from_url(url: Url) -> Result<Self> {
+        let scheme = Scheme::from_str(url.scheme())?;
+        Ok(Self {
+            scheme: Some(scheme),
+            username: url.username().to_string(),
+            password: url.password().unwrap_or("").to_string(),
+            host: Some(url.host_str().unwrap_or("").to_string()),
+            port: url.port(),
+            path_segments: url
+                .path_segments()
+                .map(|segs| segs.map(percent_decode).collect::<Vec<_>>())
+                .unwrap_or_default(),
+            query_pairs: url
+                .query_pairs()
+                .map(|(k, v)| (k.into_owned(), v.into_owned()))
+                .collect(),
+            fragment: url.fragment().map(percent_decode),
+        })
+    }
+
+    /// Create a builder pre-populated by parsing a URL string.
+    ///
+    /// Equivalent to [`HttpUrlBuilder::from_url`] applied to the result of
+    /// `url::Url::parse`.
+    pub fn parse(url: &str) -> Result<Self> {
+        Self::from_url(Url::parse(url)?)
     }
 
     /// Set the scheme.
@@ -78,25 +136,34 @@ impl HttpUrlBuilder {
         self
     }
 
-    /// Set the host (domain name or IP address).
+    /// Set the host (domain name or IP address literal, including bracketed
+    /// IPv6 such as `[::1]`).
     pub fn host(mut self, host: &str) -> Self {
         self.host = Some(host.to_string());
         self
     }
 
-    /// Set the port. Use `None` to use the scheme's default.
+    /// Set the port. Use [`remove_port`][Self::remove_port] to revert to the
+    /// scheme's default.
     pub fn port(mut self, port: u16) -> Self {
         self.port = Some(port);
         self
     }
 
-    /// Add a path segment (decoded form, will be percent-encoded on build).
+    /// Revert to the scheme's default port.
+    pub fn remove_port(mut self) -> Self {
+        self.port = None;
+        self
+    }
+
+    /// Add a single path segment (decoded form; it is percent-encoded on
+    /// build).
     pub fn add_path_segment(mut self, segment: &str) -> Self {
         self.path_segments.push(segment.to_string());
         self
     }
 
-    /// Add multiple path segments.
+    /// Add multiple path segments at once (decoded form).
     pub fn add_path_segments(mut self, segments: &[&str]) -> Self {
         for seg in segments {
             self.path_segments.push(seg.to_string());
@@ -104,69 +171,39 @@ impl HttpUrlBuilder {
         self
     }
 
-    /// Set the entire path from a decoded path string (e.g., `/a/b/c`).
-    /// The path is split on `/` and each segment is decoded.
+    /// Replace the entire path with the segments of `path` (decoded form).
+    ///
+    /// `path` is split on `/`; a leading `/` is ignored and empty segments are
+    /// dropped. Each segment is stored as-is (decoded) and re-encoded on
+    /// build. No percent-decoding is applied to the input — pass a decoded
+    /// path.
     pub fn set_path(mut self, path: &str) -> Self {
         self.path_segments.clear();
-        let path = path.trim_start_matches('/');
-        for seg in path.split('/') {
+        for seg in path.trim_start_matches('/').split('/') {
             if !seg.is_empty() {
-                self.path_segments
-                    .push(percent::decode(seg).unwrap_or_else(|_| seg.to_string()));
+                self.path_segments.push(seg.to_string());
             }
         }
         self
     }
 
-    /// Set the entire path from an already-encoded path string.
-    /// Each segment is percent-decoded before storage.
-    pub fn set_encoded_path(mut self, path: &str) -> Self {
-        self.path_segments.clear();
-        let path = path.trim_start_matches('/');
-        for seg in path.split('/') {
-            if !seg.is_empty() {
-                let decoded = percent::decode(seg).unwrap_or_else(|_| seg.to_string());
-                self.path_segments.push(decoded);
-            }
-        }
-        self
-    }
-
-    /// Add a query parameter (name and value in decoded form).
+    /// Add a query parameter (name and value in decoded form). Both are
+    /// percent-encoded on build using `application/x-www-form-urlencoded`
+    /// semantics (space becomes `+`).
     pub fn add_query_parameter(mut self, name: &str, value: &str) -> Self {
-        self.query_names_and_values.push(name.to_string());
-        self.query_names_and_values.push(value.to_string());
+        self.query_pairs.push((name.to_string(), value.to_string()));
         self
     }
 
     /// Remove all query parameters with the given name.
     pub fn remove_query_parameter(mut self, name: &str) -> Self {
-        let mut i = 0;
-        while i < self.query_names_and_values.len() {
-            if self.query_names_and_values[i] == name {
-                self.query_names_and_values.remove(i);
-                if i < self.query_names_and_values.len() {
-                    self.query_names_and_values.remove(i);
-                }
-            } else {
-                i += 2;
-            }
-        }
+        self.query_pairs.retain(|(n, _)| n != name);
         self
     }
 
     /// Clear all query parameters.
     pub fn clear_query_parameters(mut self) -> Self {
-        self.query_names_and_values.clear();
-        self
-    }
-
-    /// Add a query parameter from already-encoded name and value.
-    pub fn add_encoded_query_parameter(mut self, name: &str, value: &str) -> Self {
-        let decoded_name = percent::decode(name).unwrap_or_else(|_| name.to_string());
-        let decoded_value = percent::decode(value).unwrap_or_else(|_| value.to_string());
-        self.query_names_and_values.push(decoded_name);
-        self.query_names_and_values.push(decoded_value);
+        self.query_pairs.clear();
         self
     }
 
@@ -176,44 +213,79 @@ impl HttpUrlBuilder {
         self
     }
 
-    /// Set the fragment from an encoded form.
-    pub fn encoded_fragment(mut self, fragment: &str) -> Self {
-        self.fragment = percent::decode(fragment).ok();
-        self
-    }
-
     /// Remove the fragment.
     pub fn remove_fragment(mut self) -> Self {
         self.fragment = None;
         self
     }
 
-    /// Consume the builder and produce an `HttpUrl`.
+    /// Consume the builder and produce a [`url::Url`].
     ///
-    /// Returns an error if required components (scheme, host) are missing.
-    pub fn build(self) -> Result<HttpUrl> {
+    /// The scheme is always `http` or `https` (it is a typed [`Scheme`] field),
+    /// so the result is always a valid HTTP(S) URL. Returns an error only if
+    /// required components (scheme, host) are missing or the `url` crate
+    /// rejects the assembled URL (e.g. an invalid host).
+    ///
+    /// Use [`build`][Self::build] instead if you want an [`HttpUrl`] wrapper.
+    pub fn build_url(self) -> Result<Url> {
         let scheme = self
             .scheme
             .ok_or_else(|| HttpUrlError::BuilderValidation("scheme is required".to_string()))?;
-
-        let host_str = self
+        let host = self
             .host
             .ok_or_else(|| HttpUrlError::BuilderValidation("host is required".to_string()))?;
 
-        let host = host::canonicalize_host(&host_str)?;
+        // Assemble the base URL; `url::Url::parse` performs host validation,
+        // IDNA/punycode normalization, etc.
+        let mut url = Url::parse(&format!("{}://{}", scheme.as_str(), host))?;
 
-        let port = self.port.unwrap_or_else(|| scheme.default_port());
+        // Authority additions.
+        if !self.username.is_empty() {
+            let _ = url.set_username(&self.username);
+        }
+        if !self.password.is_empty() {
+            let _ = url.set_password(Some(&self.password));
+        }
+        if let Some(port) = self.port {
+            let _ = url.set_port(Some(port));
+        }
 
-        Ok(HttpUrl {
-            scheme,
-            username: self.username,
-            password: self.password,
-            host,
-            port,
-            path_segments: self.path_segments,
-            query_names_and_values: self.query_names_and_values,
-            fragment: self.fragment,
-        })
+        // Path segments. Only overwrite when the builder carries segments, so
+        // a builder derived via `from_url` keeps the original path when the
+        // caller never touches it.
+        if !self.path_segments.is_empty() {
+            let mut segments = url.path_segments_mut().map_err(|_| {
+                HttpUrlError::BuilderValidation("URL cannot have a path".to_string())
+            })?;
+            segments.clear();
+            for seg in &self.path_segments {
+                segments.push(seg);
+            }
+        }
+
+        // Query parameters. Explicitly clear when empty so that a builder
+        // derived via `from_url` does not retain a stale query after the
+        // caller calls `clear_query_parameters`.
+        if !self.query_pairs.is_empty() {
+            let mut query = url.query_pairs_mut();
+            for (name, value) in &self.query_pairs {
+                query.append_pair(name, value);
+            }
+        } else {
+            url.set_query(None);
+        }
+
+        url.set_fragment(self.fragment.as_deref());
+
+        Ok(url)
+    }
+
+    /// Consume the builder and produce an [`HttpUrl`] — a newtype over
+    /// [`url::Url`] enforcing the http/https invariant.
+    ///
+    /// Equivalent to [`HttpUrl::from_url`] applied to [`build_url`][Self::build_url].
+    pub fn build(self) -> Result<HttpUrl> {
+        HttpUrl::from_url(self.build_url()?)
     }
 }
 
@@ -223,12 +295,20 @@ impl Default for HttpUrlBuilder {
     }
 }
 
+impl FromStr for HttpUrlBuilder {
+    type Err = HttpUrlError;
+
+    fn from_str(s: &str) -> Result<Self> {
+        Self::parse(s)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn test_builder_basic() {
+    fn builder_basic() {
         let url = HttpUrl::builder()
             .scheme(Scheme::Https)
             .host("example.com")
@@ -238,7 +318,7 @@ mod tests {
     }
 
     #[test]
-    fn test_builder_full() {
+    fn builder_full() {
         let url = HttpUrl::builder()
             .scheme(Scheme::Https)
             .username("user")
@@ -258,7 +338,7 @@ mod tests {
     }
 
     #[test]
-    fn test_builder_path_segments() {
+    fn builder_path_segments() {
         let url = HttpUrl::builder()
             .scheme(Scheme::Http)
             .host("example.com")
@@ -267,69 +347,67 @@ mod tests {
             .add_path_segment("c")
             .build()
             .unwrap();
-        assert_eq!(url.path(), "/a/b/c");
-        assert_eq!(url.encoded_path(), "/a/b/c");
+        assert_eq!(url.as_url().path(), "/a/b/c");
     }
 
     #[test]
-    fn test_builder_path_encoding() {
+    fn builder_path_encoding() {
         let url = HttpUrl::builder()
             .scheme(Scheme::Http)
             .host("example.com")
             .add_path_segment("hello world")
             .build()
             .unwrap();
-        assert_eq!(url.encoded_path(), "/hello%20world");
-        assert_eq!(url.path(), "/hello world");
+        assert_eq!(url.as_url().path(), "/hello%20world");
     }
 
     #[test]
-    fn test_builder_missing_scheme() {
-        let result = HttpUrl::builder().host("example.com").build();
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_builder_missing_host() {
-        let result = HttpUrl::builder().scheme(Scheme::Http).build();
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_unicode_in_builder() {
+    fn builder_unicode_segment() {
         let url = HttpUrl::builder()
             .scheme(Scheme::Http)
             .host("example.com")
-            .add_path_segment("\u{4e2d}\u{6587}")
+            .add_path_segment("中文")
             .build()
             .unwrap();
-        assert_eq!(url.path(), "/\u{4e2d}\u{6587}");
+        assert_eq!(url.as_url().path(), "/%E4%B8%AD%E6%96%87");
     }
 
     #[test]
-    fn test_builder_set_path() {
+    fn builder_set_path() {
         let url = HttpUrl::builder()
             .scheme(Scheme::Http)
             .host("example.com")
             .set_path("/a/b/c")
             .build()
             .unwrap();
-        assert_eq!(url.path(), "/a/b/c");
+        assert_eq!(url.as_url().path(), "/a/b/c");
     }
 
     #[test]
-    fn test_builder_add_path_segments() {
+    fn builder_add_path_segments() {
         let url = HttpUrl::builder()
             .scheme(Scheme::Http)
             .host("example.com")
             .add_path_segments(&["a", "b", "c"])
             .build()
             .unwrap();
-        assert_eq!(url.path(), "/a/b/c");
+        assert_eq!(url.as_url().path(), "/a/b/c");
     }
 
     #[test]
-    fn test_builder_clear_query_parameters() {
+    fn builder_query_encoding() {
+        let url = HttpUrl::builder()
+            .scheme(Scheme::Http)
+            .host("example.com")
+            .add_query_parameter("name", "hello world")
+            .build()
+            .unwrap();
+        // form_urlencoded uses `+` for space.
+        assert_eq!(url.as_url().query(), Some("name=hello+world"));
+    }
+
+    #[test]
+    fn builder_clear_query_parameters() {
         let url = HttpUrl::builder()
             .scheme(Scheme::Http)
             .host("example.com")
@@ -337,11 +415,11 @@ mod tests {
             .clear_query_parameters()
             .build()
             .unwrap();
-        assert_eq!(url.query(), None);
+        assert_eq!(url.as_url().query(), None);
     }
 
     #[test]
-    fn test_builder_remove_query_parameter() {
+    fn builder_remove_query_parameter() {
         let url = HttpUrl::builder()
             .scheme(Scheme::Https)
             .host("example.com")
@@ -350,7 +428,158 @@ mod tests {
             .remove_query_parameter("a")
             .build()
             .unwrap();
-        assert_eq!(url.query_parameter("a"), None);
-        assert_eq!(url.query_parameter("b"), Some("2"));
+        assert_eq!(url.as_url().query_pairs().find(|(k, _)| k == "a"), None);
+        assert_eq!(
+            url.as_url()
+                .query_pairs()
+                .find(|(k, _)| k == "b")
+                .map(|(_, v)| v.into_owned()),
+            Some("2".to_string())
+        );
+    }
+
+    #[test]
+    fn builder_remove_fragment() {
+        let url = HttpUrl::builder()
+            .scheme(Scheme::Https)
+            .host("example.com")
+            .fragment("sec")
+            .remove_fragment()
+            .build()
+            .unwrap();
+        assert_eq!(url.as_url().fragment(), None);
+    }
+
+    #[test]
+    fn builder_remove_port() {
+        let url = HttpUrl::builder()
+            .scheme(Scheme::Http)
+            .host("example.com")
+            .port(8080)
+            .remove_port()
+            .build()
+            .unwrap();
+        assert_eq!(url.as_url().port(), None); // default port normalized away
+    }
+
+    #[test]
+    fn builder_missing_scheme() {
+        assert!(HttpUrl::builder().host("example.com").build().is_err());
+    }
+
+    #[test]
+    fn builder_missing_host() {
+        assert!(HttpUrl::builder().scheme(Scheme::Http).build().is_err());
+    }
+
+    #[test]
+    fn builder_ipv6_host() {
+        let url = HttpUrl::builder()
+            .scheme(Scheme::Http)
+            .host("[::1]")
+            .port(8080)
+            .build()
+            .unwrap();
+        assert_eq!(url.as_url().host_str(), Some("[::1]"));
+        assert_eq!(url.as_url().port(), Some(8080));
+    }
+
+    #[test]
+    fn builder_idn_normalization() {
+        // The url crate normalizes internationalized domain names.
+        let url = HttpUrl::builder()
+            .scheme(Scheme::Http)
+            .host("Bücher.de")
+            .build()
+            .unwrap();
+        assert_eq!(url.as_url().host_str(), Some("xn--bcher-kva.de"));
+    }
+
+    #[test]
+    fn builder_new_builder_roundtrip() {
+        let url = HttpUrl::parse("https://example.com/a/b?x=1&y=2#frag").unwrap();
+        let url2 = url.new_builder().build().unwrap();
+        assert_eq!(url, url2);
+    }
+
+    #[test]
+    fn builder_new_builder_modify() {
+        let url = HttpUrl::parse("https://example.com/a/b?x=1").unwrap();
+        let url2 = url
+            .new_builder()
+            .add_path_segment("c")
+            .add_query_parameter("y", "2")
+            .build()
+            .unwrap();
+        assert_eq!(url2.as_url().path(), "/a/b/c");
+        assert_eq!(
+            url2.as_url()
+                .query_pairs()
+                .find(|(k, _)| k == "x")
+                .map(|(_, v)| v.into_owned()),
+            Some("1".to_string())
+        );
+        assert_eq!(
+            url2.as_url()
+                .query_pairs()
+                .find(|(k, _)| k == "y")
+                .map(|(_, v)| v.into_owned()),
+            Some("2".to_string())
+        );
+    }
+
+    #[test]
+    fn builder_from_url() {
+        let u = url::Url::parse("https://example.com/a/b?q=1#frag").unwrap();
+        let url = HttpUrlBuilder::from_url(u.clone())
+            .unwrap()
+            .add_path_segment("c")
+            .build()
+            .unwrap();
+        assert_eq!(url.as_url().path(), "/a/b/c");
+        assert_eq!(
+            url.as_url()
+                .query_pairs()
+                .find(|(k, _)| k == "q")
+                .map(|(_, v)| v.into_owned()),
+            Some("1".to_string())
+        );
+        assert_eq!(url.as_url().fragment(), Some("frag"));
+    }
+
+    #[test]
+    fn builder_from_url_rejects_non_http() {
+        let u = url::Url::parse("ftp://example.com").unwrap();
+        assert!(HttpUrlBuilder::from_url(u).is_err());
+    }
+
+    #[test]
+    fn builder_parse() {
+        let b: HttpUrlBuilder = "https://example.com/a/b".parse().unwrap();
+        let url = b.add_path_segment("c").build().unwrap();
+        assert_eq!(url.as_url().path(), "/a/b/c");
+    }
+
+    #[test]
+    fn builder_build_url() {
+        let url = HttpUrl::builder()
+            .scheme(Scheme::Https)
+            .host("example.com")
+            .add_path_segment("api")
+            .add_query_parameter("k", "v")
+            .fragment("sec")
+            .build_url()
+            .unwrap();
+        assert_eq!(url.as_str(), "https://example.com/api?k=v#sec");
+    }
+
+    #[test]
+    fn builder_build_url_missing_scheme() {
+        assert!(HttpUrl::builder().host("example.com").build_url().is_err());
+    }
+
+    #[test]
+    fn builder_parse_rejects_non_http() {
+        assert!(HttpUrlBuilder::parse("ftp://example.com").is_err());
     }
 }

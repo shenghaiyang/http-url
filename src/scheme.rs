@@ -3,8 +3,7 @@ use core::str::FromStr;
 
 use alloc::string::ToString;
 
-use crate::HttpUrlError;
-use crate::error::Result;
+use crate::error::{HttpUrlError, Result};
 
 /// Default port for HTTP URLs.
 const DEFAULT_HTTP_PORT: u16 = 80;
@@ -12,7 +11,7 @@ const DEFAULT_HTTP_PORT: u16 = 80;
 /// Default port for HTTPS URLs.
 const DEFAULT_HTTPS_PORT: u16 = 443;
 
-/// The URL scheme – only `http` and `https` are supported.
+/// The URL scheme — only `http` and `https` are supported.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Scheme {
     /// `http://`
@@ -75,26 +74,29 @@ mod tests {
     use alloc::format;
 
     #[test]
-    fn test_display() {
+    fn display() {
         assert_eq!(format!("{}", Scheme::Http), "http");
         assert_eq!(format!("{}", Scheme::Https), "https");
     }
 
     #[test]
-    fn test_as_ref() {
+    fn as_ref() {
         assert_eq!(Scheme::Http.as_ref(), "http");
         assert_eq!(Scheme::Https.as_ref(), "https");
     }
 
     #[test]
-    fn test_from_str() {
+    fn from_str() {
         assert_eq!("http".parse::<Scheme>().unwrap(), Scheme::Http);
         assert_eq!("https".parse::<Scheme>().unwrap(), Scheme::Https);
-        assert!("ftp".parse::<Scheme>().is_err());
+        assert_eq!(
+            "ftp".parse::<Scheme>().unwrap_err(),
+            HttpUrlError::UnsupportedScheme("ftp".to_string())
+        );
     }
 
     #[test]
-    fn test_default_port() {
+    fn default_port() {
         assert_eq!(Scheme::Http.default_port(), 80);
         assert_eq!(Scheme::Https.default_port(), 443);
     }
