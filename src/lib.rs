@@ -8,15 +8,11 @@ extern crate std;
 
 mod builder;
 mod error;
-mod parse;
+mod http_url;
 mod scheme;
-mod url;
 mod util;
-
-#[cfg(feature = "url")]
-mod compat;
 
 pub use builder::HttpUrlBuilder;
 pub use error::{HttpUrlError, Result};
+pub use http_url::HttpUrl;
 pub use scheme::Scheme;
-pub use url::HttpUrl;
